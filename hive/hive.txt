@@ -1,0 +1,568 @@
+-- IMPORTANT: BEFORE CREATING ANY TABLE, MAKE SURE YOU RUN THIS COMMAND 
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+-- Dropping the table if it already exists
+DROP TABLE IF EXISTS yellow_trips_tbl;
+
+-- Creating a new external table and importing data from CSV file at the location '/common_folder/nyc_taxi_data/'
+CREATE EXTERNAL TABLE IF NOT EXISTS yellow_trips_tbl
+(
+    VendorID INT, tpep_pickup_datetime STRING, tpep_dropoff_datetime STRING, passenger_count INT,
+    trip_distance DOUBLE, RatecodeID INT, store_and_fwd_flag STRING, PULocationID INT, DOLocationID INT,
+    payment_type INT, fare_amount DOUBLE, extra DOUBLE, mta_tax DOUBLE,
+    tip_amount DOUBLE, tolls_amount DOUBLE, improvement_surcharge DOUBLE, total_amount DOUBLE
+) 
+ROW FORMAT delimited fields TERMINATED BY ','
+location '/common_folder/nyc_taxi_data/'
+tblProperties("skip.header.line.count"="1") ;
+
+
+-- ************** EDA SECTION ****************
+
+-- Finding the total count of rows imported from CSV 
+SELECT count(*) AS cnt FROM yellow_trips_tbl ;
+-- Output as followed 
+-- 
+-- cnt
+-- 1174569 
+
+
+-- Ques 1. 
+-- How many records has each TPEP provider provided? 
+-- Write a query that summarises the number of records of each provider. 
+
+SELECT VendorID, count(VendorID) as cnt FROM yellow_trips_tbl GROUP BY VendorID
+-- Output as followed 
+-- 
+-- vendorid	cnt
+-- 2		647183
+-- 1		527386
+
+
+-- Ques 2. 
+-- The data provided is for months November and December only. 
+-- Check whether the data is consistent, and if not, identify the data quality issues. 
+-- Mention all data quality issues in comments.
+
+-- Simple year checking for start and end time of trips
+SELECT pickup_yr, drop_yr, count(*) as cnt FROM (
+    SELECT
+    year(tpep_pickup_datetime) as pickup_yr,
+    month(tpep_pickup_datetime) as pickup_mnth,
+    year(tpep_dropoff_datetime) as drop_yr,
+    month(tpep_dropoff_datetime) as drop_mnth
+    FROM yellow_trips_tbl
+) as c
+GROUP by pickup_yr, drop_yr
+ORDER BY pickup_yr
+-- Output as followed 
+-- 
+-- pickup_yr	drop_yr	cnt
+-- 2003		2003	1
+-- 2008		2008	1
+-- 2008		2009	1
+-- 2009		2009	1
+-- 2017		2019	1
+-- 2017		2017	1174454
+-- 2017		2018	106
+-- 2018		2018	4
+-- OBSERVATION: There are data quality issues as data contains rows with different years also.
+--              There is a row which has starting year as 2017 and ending year as 2019
+
+-- Checking if starttime is greater than endtime
+SELECT count(*) as cnt 
+FROM yellow_trips_tbl
+WHERE 
+unix_timestamp(tpep_pickup_datetime, 'yyyy-MM-dd HH:mm:ss') > unix_timestamp(tpep_dropoff_datetime, 'yyyy-MM-dd HH:mm:ss')
+-- Output as followed
+--
+-- cnt
+-- 73
+-- OBSERVATION: There are erroneous rows where starting time is greater than ending time of the trip.
+
+
+-- Ques 3.
+-- You might have encountered unusual or erroneous rows in the dataset. 
+-- Can you conclude which vendor is doing a bad job in providing the records using different columns of the dataset? 
+-- Summarise your conclusions based on every column where these errors are present.
+
+-- Analysis of passenger_count
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE passenger_count=0 GROUP BY VendorID ;
+-- Output as followed 
+-- 
+-- vendorid	cnt
+-- 2		11
+-- 1		6813
+--
+-- OBSERVATION: There are lots of incorrect passenger count reported by TPEP provider 1 (Creative Mobile Technologies)
+
+-- Analysis of trip_distance
+-- Assumption: Trip distances can not be zero. It means taxi has not moved. 
+-- Looks like drivers are trying to fool around with the system. 
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE trip_distance=0 GROUP BY VendorID ;
+-- Output as followed
+--
+-- vendorid	cnt
+-- 2		3185
+-- 1		4217
+-- OBSERVATION: More number of incorrect trip_distance count reported by TPEP provider 1 (Creative Mobile Technologies)
+
+-- Analysis of pulocationid & dolocationid (pickup and dropoff location ids)
+SELECT VendorID, count(*) as cnt from yellow_trips_tbl WHERE (pulocationid IS NULL or dolocationid IS NULL) GROUP BY VendorID
+-- Output as followed
+--
+-- Zero Records
+-- OBSERVATION: all ok for this column of data
+
+-- Analysis of RatecodeID (Checking counts of all RatecodeID)
+SELECT RatecodeID, count(*) as cnt FROM yellow_trips_tbl GROUP BY RatecodeID ORDER BY RatecodeID;
+-- Output as followed 
+-- 
+-- ratecodeid	cnt
+-- 1		1142278
+-- 2		25338
+-- 3		2562
+-- 4		586
+-- 5		3793
+-- 6		3
+-- 99		9
+-- OBSERVATION: Some incorrect ratecodeid 99 present in the data. As per the data dictionary the range of values is 1 to 6
+
+-- Analysis of RatecodeID (Filtering incorrect RatecodeID by VendorId)
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE RatecodeID=99 GROUP BY VendorID ;
+-- Output as followed 
+-- 
+-- vendorid	cnt
+-- 2		1
+-- 1		8
+-- OBSERVATION: More number of incorrect RatecodeID reported by TPEP provider 1 (Creative Mobile Technologies)
+
+-- Analysis of Store_and_fwd_flag
+SELECT Store_and_fwd_flag, count(*) as cnt FROM yellow_trips_tbl GROUP BY Store_and_fwd_flag ;
+-- Output as followed
+--
+store_and_fwd_flag	cnt
+N			1170618
+Y			3951
+-- OBSERVATION: The values are in ok as per data dictionary.
+
+-- Analysis of Store_and_fwd_flag w.r.t VendorID where value is 'Y'
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE Store_and_fwd_flag='Y' GROUP BY VendorID ;
+-- Output as followed
+--
+-- vendorid     cnt
+-- 1            3951
+-- OBSERVATION: Only TPEP provider 1 (Creative Mobile Technologies) faces the issue of server connectivity 
+
+
+-- Analysis of payment_type
+-- Assumption: payment_type equals 4 is disputed payment which is bad for business
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE payment_type = 4 GROUP BY VendorID ;
+-- Output as followed
+--            
+-- vendorid	cnt
+-- 1	2	144
+-- 2	1	1521
+OBSERVATION: More than 10 times number of disputed payments by TPEP provider 1 (Creative Mobile Technologies)
+
+
+-- Analysis of fare_amount 
+-- Assumption: fare_amount can not be zero or less. The may be issues in the metering device. 
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE fare_amount<=0 GROUP BY VendorID  ;
+-- Output as followed 
+-- 
+-- vendorid	cnt
+-- 2		639
+-- 1		231
+-- OBSERVATION: More number of incorrect fare_amount reported by TPEP provider 2 (VeriFone Inc.)
+
+
+-- Analysis of extra
+-- Assumption: A passanger is either chareged extra or not. The valid values for rush hour and late night is 0.5 & 1.0
+--             So the valid values for this column is 0, 0.5, 1.0
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE extra NOT IN (0, 0.5, 1) GROUP BY VendorID ;
+-- Output as followed
+--
+-- vendorid     cnt
+-- 2            3033
+-- 1            1823
+-- OBSERVATION: 3033 incorrect entries by TPEP provider 2 (VeriFone Inc.) Higher as compared to other one 
+
+
+-- Analysis of mta_tax
+-- Assumption: $0.50 MTA tax automatically triggered based on the metered rate in use.
+--             If the metered rate is not high we may have $0.0 also. 
+--             So we will take only two values acceptable in this coloumn and rest as erroneous.
+SELECT mta_tax, count(*) as cnt FROM yellow_trips_tbl GROUP BY mta_tax
+-- Output as followed
+--
+-- mta_tax	cnt
+-- -0.5		544
+-- 0		5197
+-- 0.5		1168824
+-- 3		3
+-- 11.4		1
+-- OBSERVATION: 548 incorrect mta_tax values 
+
+
+-- Analysis of mta_tax by VendorID
+-- Assumption: mta_tax can not be less than zero.
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE mta_tax NOT IN (0, 0.5) GROUP BY VendorID
+-- Output as followed
+--
+-- vendorid     cnt
+-- 2            547
+-- 1            1
+-- OBSERVATION: 547 incorrect entries by TPEP provider 2 (VeriFone Inc.) 
+
+
+-- Analysis of improvement_surcharge
+SELECT improvement_surcharge, count(*) as cnt from yellow_trips_tbl GROUP BY improvement_surcharge
+-- Output as followed
+--
+-- improvement_surcharge	cnt
+-- -0.3				558
+-- 0				287
+-- 0.3				1173720
+-- 1				4
+-- OBSERVATION: Incorrect values of 849 rows
+
+
+-- Analysis of improvement_surcharge by VendorID
+-- Assumption: Only 0.3 is the correct value as per data dictionary and other values are also small in above result
+SELECT VendorID, count(*) as cnt from yellow_trips_tbl WHERE improvement_surcharge != 0.3 GROUP BY VendorID
+-- Output as followed
+--
+-- vendorid	cnt
+-- 2		558
+-- 1		287
+-- OBSERVATION: More incorrect values by TPEP provider 2 (VeriFone Inc.)
+
+
+-- Analysis of tip_amount
+-- Assumption: tip_amount can not be less than zero. 
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE tip_amount < 0 GROUP BY VendorID  ;
+-- Output as followed 
+-- 
+-- vendorid	cnt
+-- 2		4
+-- OBSERVATION: Only 4 incorrect incidences by TPEP provider 2 (VeriFone Inc.). Looks like a manual error
+
+
+-- Analysis of tolls_amount
+-- Assumption: tolls_amount can not be less than zero.
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE tolls_amount < 0 GROUP BY VendorID ;
+-- Output as followed 
+-- 
+-- vendorid	cnt
+-- 2		3
+-- OBSERVATION: Only 3 incorrect incidences by TPEP provider 2 (VeriFone Inc.). Looks like a manual error
+
+
+-- Analysis of total_amount 
+-- Assumption: total_amount can not be zero or less. There may be issues in the metering device. 
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl WHERE total_amount <= 0 GROUP BY VendorID ;
+-- Output as followed
+--              
+-- vendorid	cnt
+-- 2		639
+-- 1		42
+-- OBSERVATION: Again more number of incorrect total_amount reported by TPEP provider 2 (VeriFone Inc.)
+-- Counts of total_amount matching with fare_amount for TPEP provider 2 and certainly looks like erroneous metering device.
+-- For TPEP provider 1(Creative Mobile Technologies) there is large difference and looks like tamering issues 
+
+
+-- Analysis of tpep_pickup_datetime & tpep_dropoff_datetime
+-- Assumption: All the data should be of the year 2017 and November and December month 
+SELECT pickup_yr, drop_yr, VendorID, count(*) as cnt from (
+    SELECT VendorID,
+    year(tpep_pickup_datetime) as pickup_yr,
+    month(tpep_pickup_datetime) as pickup_mnth,
+    year(tpep_dropoff_datetime) as drop_yr,
+    month(tpep_dropoff_datetime) as drop_mnth
+    FROM yellow_trips_tbl
+) as c
+GROUP by pickup_yr, drop_yr, VendorID
+ORDER BY pickup_yr, VendorID
+-- Output as followed
+--
+-- pickup_yr	drop_yr	vendorid	cnt
+-- 2003		2003	2		1
+-- 2008		2009	2		1
+-- 2008		2008	2		1
+-- 2009		2009	2		1
+-- 2017		2019	1		1
+-- 2017		2017	1		527357
+-- 2017		2018	1		28
+-- 2017		2018	2		78
+-- 2017		2017	2		647097
+-- 2018		2018	2		4
+-- OBSERVATION: There are some data which are not in the specified year and needs to be cleaned up.
+
+
+-- Analysis of tpep_pickup_datetime & tpep_dropoff_datetime by VendorID
+-- Assumption: Trip ending time cannot be smaller than starting time.
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl
+WHERE unix_timestamp(tpep_pickup_datetime, 'yyyy-MM-dd HH:mm:ss') > unix_timestamp(tpep_dropoff_datetime, 'yyyy-MM-dd HH:mm:ss')
+GROUP BY VendorID
+-- Output as followed
+--
+vendorid        cnt
+1               73
+-- OBSERVATION: TPEP provider 1 (Creative Mobile Technologies) is having errors of trip starting time greater than ending time.
+
+-- Analysis of tpep_pickup_datetime & tpep_dropoff_datetime by VendorID 
+-- Assumption: Data should be of the year 2017 and November-December month. 
+--             Assuming trip start time as order-intiation point for the business and do calculation using tpep_pickup_datetime.
+SELECT VendorID, count(*) as cnt FROM yellow_trips_tbl 
+WHERE year(tpep_pickup_datetime)!=2017 AND month(tpep_pickup_datetime) NOT IN (11, 12)
+GROUP BY VendorID
+-- Output as followed
+--
+vendorid	cnt
+2		6
+-- OBSERVATION: Only 6 erroneous data by TPEP provider 2 (VeriFone Inc.)
+
+
+-- SUMMARIZING OBSERVATION OF EDA:
+-- critical errors present in the data shared by TPEP provider 1 (Creative Mobile Technologies) 
+-- Errors like Zero fares, no distance travelled, zero passenger count, incorrect timestamps by TPEP provider 1 can be problematic for business.
+
+
+-- ************** DATA CLEANUP AND ORC FORMAT TABLE **************
+
+
+-- PARTITION THE DATA  
+-- IMPORTANT: BEFORE PARTITIONING ANY TABLE, MAKE SURE YOU RUN THESE COMMANDS 
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+
+-- Dropping the table if it already exists
+DROP TABLE IF EXISTS yellow_trips_tbl_orc;
+
+-- Creating a new external orc table and importing data from non-orc table 
+-- and storing at the location '/user/hive/warehouse/jarpit83_ylwtrip_orc'
+-- PARTITION using pickup_mnth
+-- CLUSTERED using pickup_day
+-- Assumption: Taking trip start time as order-intiation point for the business and do calculation using tpep_pickup_datetime 
+--             We will filter the years which is not 2017 while importing data
+--             Partion monthwise(pickup_mnth) data helps in faster response for indiviual months query
+--             clusturing daywise(pickup_day) will help in faster analysis and comparison of data for each indiviual day
+--             converting date formated string to unix timestamps helps in faster speed/distance/time calculations 
+-- Extra columns in new orc table - pickup_year, pickup_mnth, pickup_day, pickup_unix_ts, drop_unix_ts  
+CREATE EXTERNAL TABLE IF NOT EXISTS yellow_trips_tbl_orc
+(   
+    VendorID INT, tpep_pickup_datetime STRING, tpep_dropoff_datetime STRING, passenger_count INT,
+    trip_distance DOUBLE, RatecodeID INT, store_and_fwd_flag STRING, PULocationID INT, DOLocationID INT,
+    payment_type INT, fare_amount DOUBLE, extra DOUBLE, mta_tax DOUBLE,
+    tip_amount DOUBLE, tolls_amount DOUBLE, improvement_surcharge DOUBLE, total_amount DOUBLE,
+    pickup_unix_ts BIGINT, drop_unix_ts BIGINT,
+    pickup_year INT, pickup_day INT
+) partitioned by (pickup_mnth int)
+clustered by (pickup_day) into 5 buckets
+stored as orc
+location '/user/hive/warehouse/jarpit83_ylwtrip_orc'
+
+-- Importing data into orc partitioned table for existing non partitioned table with where clause for filtering error data
+-- Assumption: year of tpep_pickup_datetime is 2017 and month of tpep_pickup_datetime in Nov & Dec 
+--             tpep_pickup_datetime cannot be greater than tpep_dropoff_datetime 
+--             passenger_count cannot be zero
+--             trip_distance cannot be zero
+--             RatecodeID 99 is invalid
+--             extra valid values are (0, 0.5, 1) 
+--             mta_tax valid values only 0 & 0.5 
+--             improvement_surcharge valid values is 0.3  
+--             fare_amount should be greater than zero
+--             tip_amount cannot be negative 
+--             tolls_amount cannot be negative
+--             total_amount should be greater than zero
+INSERT OVERWRITE TABLE yellow_trips_tbl_orc partition(pickup_mnth)
+SELECT
+    vendorid, tpep_pickup_datetime, tpep_dropoff_datetime,
+    passenger_count, trip_distance, ratecodeid, store_and_fwd_flag,
+    pulocationid, dolocationid, payment_type, fare_amount, extra, mta_tax,
+    tip_amount, tolls_amount, improvement_surcharge, total_amount,
+    unix_timestamp(tpep_pickup_datetime, 'yyyy-MM-dd HH:mm:ss'), unix_timestamp(tpep_dropoff_datetime, 'yyyy-MM-dd HH:mm:ss'),
+    year(tpep_pickup_datetime), day(tpep_pickup_datetime),
+    month(tpep_pickup_datetime) as pickup_mnth
+from yellow_trips_tbl 
+WHERE 
+    year(tpep_pickup_datetime)=2017 AND month(tpep_pickup_datetime) IN (11, 12) AND
+    (unix_timestamp(tpep_pickup_datetime, 'yyyy-MM-dd HH:mm:ss') < unix_timestamp(tpep_dropoff_datetime, 'yyyy-MM-dd HH:mm:ss')) AND
+    passenger_count!=0 AND trip_distance!=0 AND RatecodeID!=99 AND extra IN (0, 0.5, 1) AND mta_tax IN (0, 0.5) AND 
+    improvement_surcharge=0.3 AND fare_amount>0 AND tip_amount>=0 AND tolls_amount>=0 AND total_amount>0
+
+
+-- Finding the total count of rows imported into ORC table 
+SELECT count(*) as cnt FROM yellow_trips_tbl_orc
+-- Output as followed
+--
+-- cnt
+-- 1153602
+-- OBSERVATION: only 1.78% data was erroneous  
+
+
+
+-- ************** Analysis-I SECTION ****************
+
+-- Ques 1.
+-- Compare the overall average fare per trip for November and December.
+SELECT pickup_mnth, round(avg(fare_amount), 2) as avg_fare from yellow_trips_tbl_orc GROUP BY pickup_mnth
+-- Output as followed
+--
+-- pickup_mnth	avg_fare
+-- 11		12.91
+-- 12		12.70
+-- OBSERVATION: average fare_amount for November is slightly higher by 21 cents which is neglible.
+
+-- Ques 2.
+-- Explore the 'number of passengers per trip' - how many trips are made by each level of 'Passenger_count'? 
+-- Do most people travel solo or with other people?
+SELECT passenger_count, count(passenger_count) as cnt from yellow_trips_tbl_orc GROUP BY passenger_count
+-- Output as followed
+--
+-- passenger_count	cnt
+-- 1			817032
+-- 2			174785
+-- 3			50183
+-- 4			24680
+-- 5			54037
+-- 6			32882
+-- 7			3
+-- OBSERVATION: ~817.0k people travelled alone followed by ~174.7k with count of 2 and ~50.1k with count 3.
+--              Approx ~70% of people travelled solo and hence most people prefer travelling solo. 
+
+-- Ques 3.
+-- Which is the most preferred mode of payment?
+SELECT payment_type, count(payment_type) as cnt from yellow_trips_tbl_orc GROUP BY payment_type
+-- Output as followed
+--
+-- payment_type	cnt
+-- 1		779150
+-- 2		368660
+-- 3		4492
+-- 4		1300
+-- OBSERVATION: ~779.1k people paid by Credit card and ~368.6k paid cash. People prefer paying by Credit Card.
+
+-- Ques 4.
+-- What is the average tip paid per trip? 
+-- Compare the average tip with the 25th, 50th and 75th percentiles 
+-- Comment whether the 'average tip' is a representative statistic (of the central tendency) of 'tip amount paid'. 
+
+-- Querying average tip paid per trip
+SELECT round(avg(tip_amount), 2) as avg_tip_amount from yellow_trips_tbl_orc
+-- Output as followed
+--              
+-- avg_tip_amount
+-- 1.83
+
+-- Querying for 25th, 50th and 75th percentiles  for tip_amount
+SELECT percentile_approx(tip_amount, array(0.25, 0.50, 0.75)) as tip_amount_percentiles from yellow_trips_tbl_orc
+-- Output as followed
+--  
+-- tip_amount_percentiles
+-- [0.0,1.36,2.45]
+-- OBSERVATION: average can be considered as representative statistic of tip amount 
+--              as the difference between median(50th percentile) value and avg is even lesser than ~$0.5
+--              Further examining avg value is equalivalent to 60th percentile and hence no so much drift from central value
+
+-- Ques 5.
+-- Explore the 'Extra' (charge) variable - what fraction of total trips have an extra charge is levied?
+WITH total as ( select count(*) as total from yellow_trips_tbl_orc)
+SELECT extra_charge, round(cnt/total.total*100, 2) as fraction_percent FROM 
+(SELECT count(*) as cnt, extra_charge FROM
+    (SELECT
+        CASE
+            WHEN (extra>0) THEN 'CHARGED'
+            ELSE 'NOT_CHARGED'
+            END AS 
+        extra_charge
+    FROM yellow_trips_tbl_orc) as tmp
+    GROUP BY extra_charge
+) tmp2, total
+-- Output as followed
+-- 
+-- extra_charge	fraction_percent
+-- CHARGED		46.15
+-- NOT_CHARGED		53.85
+-- OBSERVATION: 46.15% of trips are chareged extra and 53.85% are not. There is no much difference in the two values
+--              Looks like half of the people are ok to pay extra charge for rush hours and overnight charges for convenience.
+
+
+-- ************** Analysis-II SECTION ****************
+
+-- Ques 1.
+-- What is the correlation between the number of passengers on any given trip, and the tip paid per trip? 
+-- Do multiple travellers tip more compared to solo travellers? 
+SELECT round(corr(passenger_count, tip_amount), 3) as corr_val FROM yellow_trips_tbl_orc
+-- Output as followed
+--
+-- corr_val
+-- -0.005
+-- OBSERVATION: Correlation between passenger_count and tip_amount is -0.005
+--              Though the value is negative but magnitute is very less, almost equivalent to zero. 
+--              Hence there is no correlation between passenger count and tip amount 
+
+-- Ques 2.
+-- Segregate the data into five segments of 'tip paid': [0-5), [5-10), [10-15) , [15-20) and >=20. 
+-- Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+WITH total as ( select count(*) as total from yellow_trips_tbl_orc)
+SELECT tip_segments, round(percentages/total.total*100, 2) as percentages FROM (
+SELECT tip_segments, count(*) as percentages FROM
+(SELECT
+    CASE
+      WHEN (tip_amount>=0 and tip_amount<5) THEN '[0-5)'
+      WHEN (tip_amount>=5 and tip_amount<10) THEN '[5-10)'
+      WHEN (tip_amount>=10 and tip_amount<15) THEN '[10-15)'
+      WHEN (tip_amount>=15 and tip_amount<20) THEN '[15-20)'
+      ELSE '>=20'
+    END AS tip_segments
+from yellow_trips_tbl_orc) tmp
+GROUP BY tip_segments) tmp2, total
+-- Output as followed
+--                                                                                                              
+-- tip_segments		percentages
+-- >=20			0.09
+-- [0-5)		92.4
+-- [10-15)		1.68
+-- [15-20)		0.19
+-- [5-10)		5.64
+-- OBSERVATION: Majority of people give tip between 0 to 5. The value of which is ~92%
+
+-- Ques 3.
+-- Which month has a greater average 'speed' - November or December? 
+-- Note that the variable 'speed' will have to be derived from other metrics. 
+SELECT 
+    pickup_mnth,
+    round(avg( trip_distance / (( drop_unix_ts - pickup_unix_ts )/(3600))), 3) as speed_miles_per_hr
+FROM yellow_trips_tbl_orc
+GROUP BY pickup_mnth
+-- Output as followed
+--                     
+-- pickup_mnth	speed_miles_per_hr
+-- 11		10.966
+-- 12		11.065
+-- OBSERVATION: Both months have same avg speed with a neglible difference of ~0.099 miles/hr extra.
+-- Note: Using drop_unix_ts & pickup_unix_ts as we had already created them in DDL statement & calculated during orc data import.
+
+-- Ques 4.
+-- Analyse the average speed of the most happening days of the year, i.e. 
+-- 31st December (New year’s eve) and 25th December (Christmas) and compare it with the overall average. 
+SELECT 
+    pickup_day,
+    round(avg( trip_distance / (( drop_unix_ts - pickup_unix_ts )/(3600))), 3) as speed_miles_per_hr
+FROM yellow_trips_tbl_orc
+WHERE pickup_mnth=12 AND pickup_day IN (25, 31)
+GROUP BY pickup_day
+-- Output as followed
+--
+-- pickup_day	speed_miles_per_hr
+-- 25		15.265
+-- 31		13.244
+-- OBSERVATION: These special days have higher average speed as compared that of total months value for both Nov & Dec
+--              This is due to the lesser traffic on the roads on such days as people enjoy festive season at home and vacations
+-- Note: Using drop_unix_ts & pickup_unix_ts as we had already created them in DDL statement & calculated during orc data import.
+
+
+
